@@ -1,425 +1,367 @@
-// Builds Puerto Vela: a procedural grid city of roads, sidewalks, blocks, buildings, street
-// furniture and a waterfront. Also exports the collider list and road graph that traffic,
-// police and the player all navigate with.
+// Procedural city generation for Puerto Vela - creates a complete 3D city with roads, buildings, sidewalks, street furniture and navigation data
+// Generates collision data, road graphs for traffic/pedestrian navigation, and various city landmarks
 
 import * as THREE from 'three';
-import { CONFIG, WORLD } from './config.js';
+import { CONFIG } from './config.js';
 import { makeRng, rngRange, rngInt, pick, chance } from './rng.js';
 import {
   texAsphalt, texConcrete, texGrass, texSand, texRoof,
   texFacade, texShopfront, mergeGeoms, buildingGeo,
 } from './geo.js';
 
-const FACADE_TONES = [
-  { key: 'sand', tone: '#c9b79a', style: 'shutter' },
-  { key: 'coral', tone: '#c08a76', style: 'shutter' },
-  { key: 'mint', tone: '#9fb8a4', style: 'plain' },
-  { key: 'bone', tone: '#d8d2c4', style: 'ribbon' },
-  { key: 'slate', tone: '#8d97a0', style: 'ribbon' },
-  { key: 'clay', tone: '#a8705a', style: 'brick' },
-  { key: 'cream', tone: '#e0d6bd', style: 'plain' },
-  { key: 'teal', tone: '#7d9aa0', style: 'plain' },
+// ===== FACADE MATERIALS =====
+
+/** Building facade styles with colors and architectural treatments */
+const FACADE_STYLES = [
+  { key: 'sand', tone: '#c9b79a', style: 'shutter' },      // Sandy beige with shutters
+  { key: 'coral', tone: '#c08a76', style: 'shutter' },    // Coral pink with shutters
+  { key: 'mint', tone: '#9fb8a4', style: 'plain' },        // Mint green, simple finish
+  { key: 'bone', tone: '#d8d2c4', style: 'ribbon' },        // Bone white with ribbon accents
+  { key: 'slate', tone: '#8d97a0', style: 'ribbon' },       // Slate blue with ribbon accents
+  { key: 'clay', tone: '#a8705a', style: 'brick' },         // Clay brown brick texture
+  { key: 'cream', tone: '#e0d6bd', style: 'plain' },        // Cream colored simple finish
+  { key: 'teal', tone: '#7d9aa0', style: 'plain' },         // Teal blue simple finish
 ];
 
+// ===== DERIVED LAYOUT CONSTANTS =====
+
+// Mirrors of CONFIG, read directly by the free functions below so the layout values never have
+// to be threaded through every call. Keep these in step with config.js.
+const GRID_SIZE = CONFIG.GRID;
+const CELL_SIZE = CONFIG.CELL;
+const ROAD_WIDTH = CONFIG.ROAD_W;
+const SIDEWALK_WIDTH = CONFIG.SIDEWALK;
+const CITY_SPAN = GRID_SIZE * CELL_SIZE;
+
+// ===== CITY UTILITY FUNCTIONS =====
+
+/**
+ * Calculate road center position for grid coordinate
+ * @param {number} i - Grid coordinate (0 to N)
+ * @returns {number} - World position of road center
+ */
 export function roadCenter(i) {
   return i * CONFIG.CELL;
 }
 
-/** True when a world point sits on drivable asphalt (used for spawns and ped paths). */
+/**
+ * Check if a world position is on a drivable road
+ * Used for vehicle spawning and pedestrian pathfinding
+ * @param {number} x - World X coordinate
+ * @param {number} z - World Z coordinate
+ * @returns {boolean} - True if position is on road
+ */
 export function onRoad(x, z) {
-  const half = CONFIG.ROAD_W / 2;
-  const gx = Math.abs(x / CONFIG.CELL - Math.round(x / CONFIG.CELL)) * CONFIG.CELL;
-  const gz = Math.abs(z / CONFIG.CELL - Math.round(z / CONFIG.CELL)) * CONFIG.CELL;
-  return gx <= half || gz <= half;
+  const halfRoadWidth = CONFIG.ROAD_W / 2;
+  const gridX = Math.abs(x / CONFIG.CELL - Math.round(x / CONFIG.CELL)) * CONFIG.CELL;
+  const gridZ = Math.abs(z / CONFIG.CELL - Math.round(z / CONFIG.CELL)) * CONFIG.CELL;
+  return gridX <= halfRoadWidth || gridZ <= halfRoadWidth;
 }
 
+// ===== MAIN CITY GENERATION =====
+
+/**
+ * Build the complete city of Puerto Vela with all geometry and navigation data
+ * @param {THREE.Scene} scene - Three.js scene to add city to
+ * @param {number} seed - Random seed for reproducible generation
+ * @returns {Object} - Complete city data with geometry, colliders, and navigation
+ */
 export function buildCity(scene, seed = 20261117) {
-  const rng = makeRng(seed);
-  const group = new THREE.Group();
-  group.name = 'city';
-  scene.add(group);
+  // Initialize random number generator and city group
+  const randomGenerator = makeRng(seed);
+  const cityGroup = new THREE.Group();
+  cityGroup.name = 'city';
+  scene.add(cityGroup);
 
-  const colliders = [];      // {minX,maxX,minZ,maxZ,h} axis-aligned boxes the player cannot enter
-  const buildings = [];      // visual metadata, used for minimap tinting
-  const lampPositions = [];
-  const treePositions = [];
-  const parkedSpots = [];    // {x,z,rot} good spots for parked cars
-  const pedRoutes = [];      // sidewalk polylines
+  // City data collections
+  const colliders = [];      // Collision boxes for buildings and obstacles
+  const buildings = [];      // Visual building metadata for minimap tinting
+  const streetLamps = [];    // Street lamp positions
+  const treePositions = [];  // Tree positions and scales
+  const parkingSpots = [];    // Parking spot locations and orientations
+  const pedestrianRoutes = []; // Sidewalk path networks for pedestrians
 
-  const N = CONFIG.GRID;
-  const CELL = CONFIG.CELL;
-  const ROAD = CONFIG.ROAD_W;
-  const SW = CONFIG.SIDEWALK;
-  const span = N * CELL;
+  // City dimensions and constants
+  const gridSize = CONFIG.GRID;
+  const cellSize = CONFIG.CELL;
+  const roadWidth = CONFIG.ROAD_W;
+  const sidewalkWidth = CONFIG.SIDEWALK;
+  const citySpan = gridSize * cellSize;
 
-  // ---------- ground ----------
-  const groundGeo = new THREE.PlaneGeometry(span * 2.6, span * 2.6);
-  groundGeo.rotateX(-Math.PI / 2);
-  const gtex = texGrass();
-  gtex.repeat.set(120, 120);
+  // ===== GROUND BASE =====
+  
+  // Create main ground plane with grass texture
+  const groundGeometry = new THREE.PlaneGeometry(citySpan * 2.6, citySpan * 2.6);
+  groundGeometry.rotateX(-Math.PI / 2);
+  const grassTexture = texGrass();
+  grassTexture.repeat.set(120, 120);
   const ground = new THREE.Mesh(
-    groundGeo,
-    new THREE.MeshLambertMaterial({ map: gtex, color: 0x9aa88c }),
+    groundGeometry,
+    new THREE.MeshLambertMaterial({ map: grassTexture, color: 0x9aa88c }),
   );
-  ground.position.set(span / 2, -0.05, span / 2);
+  ground.position.set(citySpan / 2, -0.05, citySpan / 2);
   ground.receiveShadow = false;
-  group.add(ground);
+  cityGroup.add(ground);
 
-  // ---------- asphalt ----------
-  const asphalt = texAsphalt();
-  asphalt.repeat.set(2, 26);
-  const roadMat = new THREE.MeshLambertMaterial({ map: asphalt, color: 0xd8dce2 });
+  // ===== ROAD NETWORK =====
+  
+  // Create asphalt roads with texture
+  const asphaltTexture = texAsphalt();
+  asphaltTexture.repeat.set(2, 26);
+  const roadMaterial = new THREE.MeshLambertMaterial({ 
+    map: asphaltTexture, 
+    color: 0xd8dce2 
+  });
+  
   const roadParts = [];
-  for (let i = 0; i <= N; i++) {
-    const c = roadCenter(i);
-    // north-south strip
+  for (let i = 0; i <= gridSize; i++) {
+    const center = roadCenter(i);
+    
+    // North-south road strips
     roadParts.push({
-      geometry: new THREE.PlaneGeometry(ROAD, span + ROAD).rotateX(-Math.PI / 2),
-      matrix: new THREE.Matrix4().makeTranslation(c, 0.01, span / 2),
+      geometry: new THREE.PlaneGeometry(roadWidth, citySpan + roadWidth).rotateX(-Math.PI / 2),
+      matrix: new THREE.Matrix4().makeTranslation(center, 0.01, citySpan / 2),
     });
-    // east-west strip
+    
+    // East-west road strips
     roadParts.push({
-      geometry: new THREE.PlaneGeometry(span + ROAD, ROAD).rotateX(-Math.PI / 2),
-      matrix: new THREE.Matrix4().makeTranslation(span / 2, 0.012, c),
+      geometry: new THREE.PlaneGeometry(citySpan + roadWidth, roadWidth).rotateX(-Math.PI / 2),
+      matrix: new THREE.Matrix4().makeTranslation(citySpan / 2, 0.012, center),
     });
   }
-  const roadGeo = mergeGeoms(roadParts);
-  const roads = new THREE.Mesh(roadGeo, roadMat);
-  roads.name = 'roads';
-  group.add(roads);
+  
+  const roadsMesh = new THREE.Mesh(mergeGeoms(roadParts), roadMaterial);
+  roadsMesh.name = 'roads';
+  cityGroup.add(roadsMesh);
 
-  // ---------- lane markings ----------
-  const lineMat = new THREE.MeshBasicMaterial({ color: 0xe8e2cf });
+  // ===== ROAD MARKINGS =====
+  
+  // Lane markings and stop lines
+  const lineMaterial = new THREE.MeshBasicMaterial({ color: 0xe8e2cf });
   const lineParts = [];
-  const dashLen = 3.0;
+  const stopLineParts = [];
+  
+  const dashLength = 3.0;
   const dashGap = 3.6;
-  const junction = ROAD / 2 + SW * 0.55;
-  for (let i = 0; i <= N; i++) {
-    const c = roadCenter(i);
-    // walk each straight run between two intersections and lay dashes on it
-    for (let k = 0; k < N; k++) {
-      const a = roadCenter(k) + junction;
-      const b = roadCenter(k + 1) - junction;
-      for (let t = a; t + dashLen <= b; t += dashLen + dashGap) {
-        const mid = t + dashLen / 2;
+  const junctionOffset = roadWidth / 2 + sidewalkWidth * 0.55;
+  
+  // Generate lane markings
+  for (let i = 0; i <= gridSize; i++) {
+    const center = roadCenter(i);
+    
+    // Place dashed lines along road segments
+    for (let segment = 0; segment < gridSize; segment++) {
+      const start = roadCenter(segment) + junctionOffset;
+      const end = roadCenter(segment + 1) - junctionOffset;
+      
+      for (let position = start; position + dashLength <= end; position += dashLength + dashGap) {
+        const centerOfDash = position + dashLength / 2;
+        
+        // North-south lane markings
         lineParts.push({
-          geometry: new THREE.PlaneGeometry(0.3, dashLen).rotateX(-Math.PI / 2),
-          matrix: new THREE.Matrix4().makeTranslation(c, 0.035, mid + dashLen / 2),
+          geometry: new THREE.PlaneGeometry(0.3, dashLength).rotateX(-Math.PI / 2),
+          matrix: new THREE.Matrix4().makeTranslation(center, 0.035, centerOfDash + dashLength / 2),
         });
+        
+        // East-west lane markings
         lineParts.push({
-          geometry: new THREE.PlaneGeometry(dashLen, 0.3).rotateX(-Math.PI / 2),
-          matrix: new THREE.Matrix4().makeTranslation(mid + dashLen / 2, 0.036, c),
+          geometry: new THREE.PlaneGeometry(dashLength, 0.3).rotateX(-Math.PI / 2),
+          matrix: new THREE.Matrix4().makeTranslation(centerOfDash + dashLength / 2, 0.036, center),
         });
       }
     }
   }
-  // solid stop lines at each intersection mouth
-  const stopParts = [];
-  for (let i = 0; i <= N; i++) {
-    for (let j = 0; j <= N; j++) {
-      const cx = roadCenter(i);
-      const cz = roadCenter(j);
-      const off = ROAD / 2 + 0.9;
-      for (const [dx, dz, w, d] of [
-        [0, -off, ROAD, 0.4], [0, off, ROAD, 0.4],
-        [-off, 0, 0.4, ROAD], [off, 0, 0.4, ROAD],
+  
+  // Generate stop lines at intersections
+  for (let i = 0; i <= gridSize; i++) {
+    for (let j = 0; j <= gridSize; j++) {
+      const centerX = roadCenter(i);
+      const centerZ = roadCenter(j);
+      const stopOffset = roadWidth / 2 + 0.9;
+      
+      // Four stop lines per intersection
+      for (const [deltaX, deltaZ, width, depth] of [
+        [0, -stopOffset, roadWidth, 0.4],    // North
+        [0, stopOffset, roadWidth, 0.4],     // South
+        [-stopOffset, 0, 0.4, roadWidth],   // West
+        [stopOffset, 0, 0.4, roadWidth],    // East
       ]) {
-        stopParts.push({
-          geometry: new THREE.PlaneGeometry(w, d).rotateX(-Math.PI / 2),
-          matrix: new THREE.Matrix4().makeTranslation(cx + dx * 1.1, 0.037, cz + dz * 1.1),
+        stopLineParts.push({
+          geometry: new THREE.PlaneGeometry(width, depth).rotateX(-Math.PI / 2),
+          matrix: new THREE.Matrix4().makeTranslation(
+            centerX + deltaX * 1.1, 
+            0.037, 
+            centerZ + deltaZ * 1.1
+          ),
         });
       }
     }
   }
-  const markings = new THREE.Mesh(mergeGeoms(lineParts), lineMat);
-  markings.name = 'lane-markings';
-  group.add(markings);
-  const stops = new THREE.Mesh(mergeGeoms(stopParts), new THREE.MeshBasicMaterial({ color: 0xd9d2bc }));
-  stops.name = 'stop-lines';
-  group.add(stops);
+  
+  // Create and add road markings
+  if (lineParts.length > 0) {
+    const laneMarkings = new THREE.Mesh(mergeGeoms(lineParts), lineMaterial);
+    laneMarkings.name = 'lane-markings';
+    cityGroup.add(laneMarkings);
+  }
+  
+  if (stopLineParts.length > 0) {
+    const stopLines = new THREE.Mesh(
+      mergeGeoms(stopLineParts), 
+      new THREE.MeshBasicMaterial({ color: 0xd9d2bc })
+    );
+    stopLines.name = 'stop-lines';
+    cityGroup.add(stopLines);
+  }
 
-  // ---------- blocks: sidewalk slab + buildings ----------
-  const concrete = texConcrete();
-  const walkMat = new THREE.MeshLambertMaterial({ map: concrete, color: 0xd6d2c8 });
-  walkMat.polygonOffset = true;
-  walkMat.polygonOffsetFactor = -1;
+  // ===== BLOCKS AND BUILDINGS =====
+  
+  // Sidewalk and building materials
+  const concreteTexture = texConcrete();
+  const sidewalkMaterial = new THREE.MeshLambertMaterial({ 
+    map: concreteTexture, 
+    color: 0xd6d2c8 
+  });
+  sidewalkMaterial.polygonOffset = true;
+  sidewalkMaterial.polygonOffsetFactor = -1;
 
-  const facadeCache = new Map();
-  const facadeMat = (tone) => {
-    if (facadeCache.has(tone.key)) return facadeCache.get(tone.key);
-    const t = texFacade(tone.key, tone.tone, tone.style);
-    const m = new THREE.MeshLambertMaterial({ map: t });
-    facadeCache.set(tone.key, m);
-    return m;
+  // Facade material caching for performance
+  const facadeMaterialCache = new Map();
+  const getFacadeMaterial = (tone) => {
+    if (facadeMaterialCache.has(tone.key)) {
+      return facadeMaterialCache.get(tone.key);
+    }
+    const texture = texFacade(tone.key, tone.tone, tone.style);
+    const material = new THREE.MeshLambertMaterial({ map: texture });
+    facadeMaterialCache.set(tone.key, material);
+    return material;
   };
 
-  const roofTex = texRoof();
-  roofTex.repeat.set(3, 3);
-  const roofMat = new THREE.MeshLambertMaterial({ map: roofTex, color: 0x9aa0a6 });
-  const shopTex = texShopfront();
-  const shopMat = new THREE.MeshLambertMaterial({ map: shopTex });
+  // Roof and shopfront materials
+  const roofTexture = texRoof();
+  roofTexture.repeat.set(3, 3);
+  const roofMaterial = new THREE.MeshLambertMaterial({ 
+    map: roofTexture, 
+    color: 0x9aa0a6 
+  });
+  
+  const shopfrontTexture = texShopfront();
+  const shopfrontMaterial = new THREE.MeshLambertMaterial({ map: shopfrontTexture });
 
-  // Group merged building bodies by facade material key.
-  const bodyParts = new Map();
+  // Group building parts by material for efficient rendering
+  const buildingBodyParts = new Map();
   const roofParts = [];
-  const shopParts = [];
-  const trimParts = [];
+  const shopfrontParts = [];
+  const rooftopTrimParts = [];
 
-  const blockInner = CELL - ROAD - SW * 2; // usable footprint per block
+  const blockInnerSize = cellSize - roadWidth - sidewalkWidth * 2;
 
-  for (let bx = 0; bx < N; bx++) {
-    for (let bz = 0; bz < N; bz++) {
-      const x0 = bx * CELL + ROAD / 2 + SW;
-      const z0 = bz * CELL + ROAD / 2 + SW;
-      const cx = x0 + blockInner / 2;
-      const cz = z0 + blockInner / 2;
+  // Generate city blocks
+  for (let blockX = 0; blockX < gridSize; blockX++) {
+    for (let blockZ = 0; blockZ < gridSize; blockZ++) {
+      const blockStartX = blockX * cellSize + roadWidth / 2 + sidewalkWidth;
+      const blockStartZ = blockZ * cellSize + roadWidth / 2 + sidewalkWidth;
+      const blockCenterX = blockStartX + blockInnerSize / 2;
+      const blockCenterZ = blockStartZ + blockInnerSize / 2;
 
-      // sidewalk slab under the whole block
-      const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(blockInner + SW * 2, 0.22, blockInner + SW * 2),
-        walkMat,
+      // Sidewalk slab under the entire block
+      const sidewalkSlab = new THREE.Mesh(
+        new THREE.BoxGeometry(blockInnerSize + sidewalkWidth * 2, 0.22, blockInnerSize + sidewalkWidth * 2),
+        sidewalkMaterial,
       );
-      slab.position.set(cx, 0.11, cz);
-      group.add(slab);
+      sidewalkSlab.position.set(blockCenterX, 0.11, blockCenterZ);
+      cityGroup.add(sidewalkSlab);
 
-      const isPark = chance(rng, 0.085);
-      if (isPark) {
-        // a little green with trees: no collider so the player can cross it
-        const grassTex = texGrass();
-        const gm = new THREE.MeshLambertMaterial({ map: grassTex, color: 0x9fbb86 });
-        const patch = new THREE.Mesh(new THREE.BoxGeometry(blockInner * 0.72, 0.14, blockInner * 0.72), gm);
-        patch.position.set(cx, 0.22, cz);
-        group.add(patch);
-        const nTrees = rngInt(rng, 3, 6);
-        for (let t = 0; t < nTrees; t++) {
-          treePositions.push({
-            x: cx + rngRange(rng, -blockInner * 0.3, blockInner * 0.3),
-            z: cz + rngRange(rng, -blockInner * 0.3, blockInner * 0.3),
-            s: rngRange(rng, 0.85, 1.35),
-          });
-        }
+      // Random chance for park blocks
+      const isParkBlock = chance(randomGenerator, 0.085);
+      if (isParkBlock) {
+        createParkBlock(
+          cityGroup, 
+          blockCenterX, 
+          blockCenterZ, 
+          blockInnerSize, 
+          randomGenerator, 
+          treePositions,
+          colliders
+        );
         continue;
       }
 
-      // split the block into 1-3 lots along one axis so the skyline varies
-      const lots = blockInner > 26 ? rngInt(rng, 1, 3) : 1;
-      const axis = chance(rng, 0.5) ? 'x' : 'z';
-      const lotSize = blockInner / lots;
-      for (let l = 0; l < lots; l++) {
-        const inset = rngRange(rng, 0.5, 1.6);
-        const w = axis === 'x' ? lotSize - inset * 1.6 : blockInner - inset * 1.6;
-        const d = axis === 'x' ? blockInner - inset * 1.6 : lotSize - inset * 1.6;
-        const px = axis === 'x' ? x0 + l * lotSize + lotSize / 2 : cx;
-        const pz = axis === 'x' ? cz : z0 + l * lotSize + lotSize / 2;
+      // Generate building lots within the block
+      const numberOfLots = blockInnerSize > 26 ? rngInt(randomGenerator, 1, 3) : 1;
+      const splitAxis = chance(randomGenerator, 0.5) ? 'x' : 'z';
+      const lotSize = blockInnerSize / numberOfLots;
 
-        const floors = pick(rng, [2, 3, 3, 4, 5, 6, 8, 10]);
-        const h = floors * 3.4 + rngRange(rng, 0, 2);
-        const tone = pick(rng, FACADE_TONES);
-        const matKey = tone.key;
-
-        // body sits on top of the 0.22 slab
-        const geo = buildingGeo(w, h, d);
-        const z0y = 0.22;
-        bodyParts.set(matKey, bodyParts.get(matKey) ?? []);
-        bodyParts.get(matKey).push({
-          geometry: geo,
-          matrix: new THREE.Matrix4().makeTranslation(px, z0y + h / 2, pz),
+      for (let lotIndex = 0; lotIndex < numberOfLots; lotIndex++) {
+        createBuildingLot({
+          rng: randomGenerator,
+          blockStartX,
+          blockStartZ,
+          blockCenterX,
+          blockCenterZ,
+          lotIndex,
+          lotSize,
+          splitAxis,
+          blockInnerSize,
+          bodyParts: buildingBodyParts,
+          roofParts,
+          shopParts: shopfrontParts,
+          trimParts: rooftopTrimParts,
+          colliders,
+          buildings,
         });
-
-        // ground-floor shopfront band on taller buildings facing the road
-        if (h > 10) {
-          const bandH = 3.0;
-          shopParts.push({
-            geometry: new THREE.BoxGeometry(w + 0.06, bandH, d + 0.06),
-            matrix: new THREE.Matrix4().makeTranslation(px, z0y + bandH / 2, pz),
-          });
-        }
-
-        // parapet + roof
-        roofParts.push({
-          geometry: new THREE.BoxGeometry(w + 0.5, 0.45, d + 0.5),
-          matrix: new THREE.Matrix4().makeTranslation(px, z0y + h + 0.1, pz),
-        });
-        // a rooftop box (AC unit / stair house) for silhouette interest
-        if (chance(rng, 0.6)) {
-          const bw = w * rngRange(rng, 0.2, 0.35);
-          const bd = d * rngRange(rng, 0.2, 0.35);
-          trimParts.push({
-            geometry: new THREE.BoxGeometry(bw, rngRange(rng, 1.0, 2.2), bd),
-            matrix: new THREE.Matrix4().makeTranslation(
-              px + rngRange(rng, -w * 0.2, w * 0.2),
-              z0y + h + 0.9,
-              pz + rngRange(rng, -d * 0.2, d * 0.2),
-            ),
-          });
-        }
-
-        colliders.push({
-          minX: px - w / 2, maxX: px + w / 2,
-          minZ: pz - d / 2, maxZ: pz + d / 2,
-          h: h + z0y,
-        });
-        buildings.push({ x: px, z: pz, w, d, h, tone: tone.key });
       }
     }
   }
 
-  for (const [key, parts] of bodyParts) {
-    if (!parts.length) continue;
-    const tone = FACADE_TONES.find((t) => t.key === key);
-    const mesh = new THREE.Mesh(mergeGeoms(parts), facadeMat(tone));
-    mesh.name = `buildings-${key}`;
-    group.add(mesh);
-  }
-  if (shopParts.length) {
-    const m = new THREE.Mesh(mergeGeoms(shopParts), shopMat);
-    m.name = 'shopfronts';
-    group.add(m);
-  }
-  if (roofParts.length) {
-    const m = new THREE.Mesh(mergeGeoms(roofParts), roofMat);
-    m.name = 'roofs';
-    group.add(m);
-  }
-  if (trimParts.length) {
-    const m = new THREE.Mesh(mergeGeoms(trimParts), new THREE.MeshLambertMaterial({ color: 0xb3b7bb }));
-    m.name = 'rooftop-units';
-    group.add(m);
-  }
-
-  // ---------- street lamps ----------
-  const lampPoleParts = [];
-  const lampHeadParts = [];
-  for (let i = 0; i <= N; i++) {
-    for (let j = 0; j <= N; j++) {
-      if (!chance(rng, 0.55)) continue;
-      const cx = roadCenter(i);
-      const cz = roadCenter(j) + CELL * 0.5;
-      if (cz > span - 2) continue;
-      const side = chance(rng, 0.5) ? 1 : -1;
-      const lx = cx + side * (ROAD / 2 + 1.0);
-      lampPositions.push({ x: lx, z: cz });
-      lampPoleParts.push({
-        geometry: new THREE.CylinderGeometry(0.13, 0.17, 6.4, 6),
-        matrix: new THREE.Matrix4().makeTranslation(lx, 3.2, cz),
-      });
-      lampHeadParts.push({
-        geometry: new THREE.BoxGeometry(1.1, 0.22, 0.5),
-        matrix: new THREE.Matrix4().makeTranslation(lx - side * 0.5, 6.4, cz),
-      });
-    }
-  }
-  if (lampPoleParts.length) {
-    const poles = new THREE.Mesh(mergeGeoms(lampPoleParts), new THREE.MeshLambertMaterial({ color: 0x555c63 }));
-    poles.name = 'lamp-poles';
-    group.add(poles);
-    const heads = new THREE.Mesh(
-      mergeGeoms(lampHeadParts),
-      new THREE.MeshBasicMaterial({ color: 0xffe9b8 }),
-    );
-    heads.name = 'lamp-heads';
-    group.add(heads);
-  }
-
-  // ---------- trees ----------
-  if (treePositions.length) {
-    const trunkParts = [];
-    const crownParts = [];
-    for (const t of treePositions) {
-      trunkParts.push({
-        geometry: new THREE.CylinderGeometry(0.22 * t.s, 0.3 * t.s, 2.4 * t.s, 6),
-        matrix: new THREE.Matrix4().makeTranslation(t.x, 1.2 * t.s, t.z),
-      });
-      crownParts.push({
-        geometry: new THREE.IcosahedronGeometry(1.85 * t.s, 0),
-        matrix: new THREE.Matrix4().makeTranslation(t.x, 3.5 * t.s, t.z),
-      });
-      colliders.push({
-        minX: t.x - 0.4, maxX: t.x + 0.4,
-        minZ: t.z - 0.4, maxZ: t.z + 0.4, h: 2.4 * t.s,
-      });
-    }
-    group.add(new THREE.Mesh(mergeGeoms(trunkParts), new THREE.MeshLambertMaterial({ color: 0x5b4632 })));
-    group.add(new THREE.Mesh(mergeGeoms(crownParts), new THREE.MeshLambertMaterial({ color: 0x4a7a44, flatShading: true })));
-  }
-
-  // ---------- waterfront along the south edge ----------
-  const sandTex = texSand();
-  sandTex.repeat.set(30, 6);
-  const beach = new THREE.Mesh(
-    new THREE.BoxGeometry(span + 160, 0.1, 46),
-    new THREE.MeshLambertMaterial({ map: sandTex, color: 0xd8c49b }),
+  // Create building meshes from grouped parts
+  createBuildingMeshes(
+    cityGroup, 
+    buildingBodyParts, 
+    roofParts, 
+    shopfrontParts, 
+    rooftopTrimParts,
+    FACADE_STYLES,
+    getFacadeMaterial,
+    roofMaterial,
+    shopfrontMaterial
   );
-  beach.position.set(span / 2, 0.02, span + 23);
-  group.add(beach);
 
-  const water = new THREE.Mesh(
-    new THREE.PlaneGeometry(span * 2.4, 900, 1, 1).rotateX(-Math.PI / 2),
-    new THREE.MeshLambertMaterial({ color: 0x2c6f8f, transparent: true, opacity: 0.92 }),
+  // ===== STREET FURNITURE =====
+  
+  // Street lamps
+  createStreetLamps(
+    cityGroup, 
+    gridSize, 
+    citySpan, 
+    randomGenerator, 
+    streetLamps
   );
-  water.position.set(span / 2, -0.35, span + 46 + 450);
-  water.name = 'sea';
-  group.add(water);
 
-  // ---------- parked car spots along every other curb ----------
-  for (let i = 0; i <= N; i++) {
-    for (let j = 0; j < N; j++) {
-      if (!chance(rng, 0.5)) continue;
-      const c = roadCenter(i);
-      const z = roadCenter(j) + CELL * 0.5 + rngRange(rng, -4, 4);
-      const side = chance(rng, 0.5) ? 1 : -1;
-      parkedSpots.push({
-        x: c + side * (ROAD / 2 - 1.9),
-        z,
-        rot: side > 0 ? Math.PI : 0,
-      });
-    }
-  }
-  for (let j = 0; j <= N; j++) {
-    for (let i = 0; i < N; i++) {
-      if (!chance(rng, 0.5)) continue;
-      const c = roadCenter(j);
-      const x = roadCenter(i) + CELL * 0.5 + rngRange(rng, -4, 4);
-      const side = chance(rng, 0.5) ? 1 : -1;
-      parkedSpots.push({
-        x,
-        z: c + side * (ROAD / 2 - 1.9),
-        rot: side > 0 ? -Math.PI / 2 : Math.PI / 2,
-      });
-    }
+  // Trees (already added during park generation)
+  if (treePositions.length > 0) {
+    createTrees(cityGroup, treePositions, colliders);
   }
 
-  // ---------- sidewalk routes for pedestrians (one per block edge) ----------
-  for (let i = 0; i <= N; i++) {
-    const x = roadCenter(i) + (ROAD / 2 + SW * 0.5);
-    pedRoutes.push({ axis: 'z', fixed: x, from: ROAD / 2, to: span - ROAD / 2 });
-    pedRoutes.push({ axis: 'z', fixed: roadCenter(i) - (ROAD / 2 + SW * 0.5), from: ROAD / 2, to: span - ROAD / 2 });
-  }
-  for (let j = 0; j <= N; j++) {
-    const z = roadCenter(j) + (ROAD / 2 + SW * 0.5);
-    pedRoutes.push({ axis: 'x', fixed: z, from: ROAD / 2, to: span - ROAD / 2 });
-    pedRoutes.push({ axis: 'x', fixed: roadCenter(j) - (ROAD / 2 + SW * 0.5), from: ROAD / 2, to: span - ROAD / 2 });
-  }
+  // ===== WATERFRONT =====
+  
+  createWaterfront(cityGroup, citySpan);
 
-  // ---------- road graph for traffic ----------
-  const nodes = [];
-  const index = (i, j) => j * (N + 1) + i;
-  for (let j = 0; j <= N; j++) {
-    for (let i = 0; i <= N; i++) {
-      nodes.push({ i, j, x: roadCenter(i), z: roadCenter(j) });
-    }
-  }
-  const neighbours = nodes.map((n) => {
-    const out = [];
-    if (n.i > 0) out.push(index(n.i - 1, n.j));
-    if (n.i < N) out.push(index(n.i + 1, n.j));
-    if (n.j > 0) out.push(index(n.i, n.j - 1));
-    if (n.j < N) out.push(index(n.i, n.j + 1));
-    return out;
-  });
+  // ===== PARKING AND NAVIGATION =====
+  
+  // Generate parking spots along curbs
+  generateParkingSpots(cityGroup, gridSize, citySpan, randomGenerator, parkingSpots);
 
-  // Named places the story leans on: an intersection plus a facing point.
-  const poi = {
+  // Create pedestrian sidewalk routes
+  generatePedestrianRoutes(gridSize, citySpan, pedestrianRoutes);
+
+  // Create road graph for traffic navigation
+  const roadGraph = createRoadGraph(gridSize, citySpan);
+
+  // ===== LANDMARKS AND SPAWN POINTS =====
+  
+  // Points of interest for missions and navigation
+  const pointsOfInterest = {
     garage: { x: roadCenter(2), z: roadCenter(9) + 7, name: 'Garage' },
     docks: { x: roadCenter(8), z: roadCenter(9) + 12, name: 'Docks' },
     club: { x: roadCenter(5), z: roadCenter(6), name: 'Club Neon' },
@@ -429,27 +371,469 @@ export function buildCity(scene, seed = 20261117) {
     plaza: { x: roadCenter(5), z: roadCenter(1), name: 'Plaza Sol' },
   };
 
-  const centre = { x: span / 2, z: span / 2 };
+  const cityCenter = { x: citySpan / 2, z: citySpan / 2 };
 
   return {
-    group, colliders, buildings, nodes, neighbours, index,
-    lampPositions, parkedSpots, pedRoutes, poi, centre,
-    span, cell: CELL, grid: N, roadWidth: ROAD, sidewalk: SW,
-    /** A good starting spot: mid-block on the main avenue, facing the plaza. */
+    // Core city data
+    group: cityGroup,
+    colliders,
+    buildings,
+    nodes: roadGraph.nodes,
+    neighbours: roadGraph.neighbours,
+    index: roadGraph.index,
+
+    // City elements. These public key names are the contract every other module imports:
+    // lampPositions → lamps, parkedSpots → kerbside parking, pedRoutes → pedestrian sidewalks,
+    // poi → named landmarks, centre → middle of the grid.
+    lampPositions: streetLamps,
+    parkedSpots: parkingSpots,
+    pedRoutes: pedestrianRoutes,
+    poi: pointsOfInterest,
+    centre: cityCenter,
+    
+    // City dimensions
+    span: citySpan,
+    cell: cellSize,
+    grid: gridSize,
+    roadWidth,
+    sidewalk: sidewalkWidth,
+    
+    // Spawn and navigation helpers
     spawnPoint: { x: roadCenter(5) + 3.4, z: roadCenter(6) + 12, yaw: Math.PI },
-    /** Nearest road-graph node index to a world position. */
+    
+    /**
+     * Find nearest road graph node to a world position
+     * @param {number} x - World X coordinate
+     * @param {number} z - World Z coordinate
+     * @returns {number} - Index of nearest node
+     */
     nearestNode(x, z) {
-      const i = Math.max(0, Math.min(N, Math.round(x / CELL)));
-      const j = Math.max(0, Math.min(N, Math.round(z / CELL)));
-      return index(i, j);
+      const gridI = Math.max(0, Math.min(gridSize, Math.round(x / cellSize)));
+      const gridJ = Math.max(0, Math.min(gridSize, Math.round(z / cellSize)));
+      return roadGraph.index(gridI, gridJ);
     },
-    /** Random drivable point (on a road, mid-block) — used for spawns. */
+    
+    /**
+     * Generate random drivable point on road network
+     * @param {Function} rand - Random number generator function
+     * @returns {Object} - {x, z, rot} position and rotation
+     */
     randomRoadPoint(rand = Math.random) {
-      const vertical = rand() < 0.5;
-      const a = Math.floor(rand() * (N + 1));
-      const b = (Math.floor(rand() * N) + 0.5) * CELL;
-      if (vertical) return { x: roadCenter(a), z: b, rot: rand() < 0.5 ? 0 : Math.PI };
-      return { x: b, z: roadCenter(a), rot: rand() < 0.5 ? Math.PI / 2 : -Math.PI / 2 };
+      const isVertical = rand() < 0.5;
+      const roadIndex = Math.floor(rand() * (gridSize + 1));
+      const blockPosition = (Math.floor(rand() * gridSize) + 0.5) * cellSize;
+      
+      if (isVertical) {
+        return { 
+          x: roadCenter(roadIndex), 
+          z: blockPosition, 
+          rot: rand() < 0.5 ? 0 : Math.PI 
+        };
+      }
+      return { 
+        x: blockPosition, 
+        z: roadCenter(roadIndex), 
+        rot: rand() < 0.5 ? Math.PI / 2 : -Math.PI / 2 
+      };
     },
   };
 }
+
+// ===== BUILDING GENERATION HELPERS =====
+
+/**
+ * Create a park block with grass and trees
+ * @param {THREE.Group} group - City group to add to
+ * @param {number} centerX - Block center X
+ * @param {number} centerZ - Block center Z
+ * @param {number} size - Block inner size
+ * @param {Function} rng - Random number generator
+ * @param {Array} trees - Array to add tree positions to
+ * @param {Array} colliders - Array to add collision data to
+ */
+function createParkBlock(group, centerX, centerZ, size, rng, trees, colliders) {
+  // Grass patch in park
+  const grassTexture = texGrass();
+  const grassMaterial = new THREE.MeshLambertMaterial({ 
+    map: grassTexture, 
+    color: 0x9fbb86 
+  });
+  const grassPatch = new THREE.Mesh(
+    new THREE.BoxGeometry(size * 0.72, 0.14, size * 0.72), 
+    grassMaterial
+  );
+  grassPatch.position.set(centerX, 0.22, centerZ);
+  group.add(grassPatch);
+
+  // Add trees to park
+  const numberOfTrees = rngInt(rng, 3, 6);
+  for (let tree = 0; tree < numberOfTrees; tree++) {
+    trees.push({
+      x: centerX + rngRange(rng, -size * 0.3, size * 0.3),
+      z: centerZ + rngRange(rng, -size * 0.3, size * 0.3),
+      scale: rngRange(rng, 0.85, 1.35),
+    });
+  }
+}
+
+/**
+ * Create a single building lot inside a block and register its geometry, collision box and
+ * minimap metadata. Takes one options object because the lot touches many shared collections.
+ * @param {Object} lot - see the destructuring below; `rng` and the part arrays are required.
+ */
+function createBuildingLot({
+  rng, blockStartX, blockStartZ, blockCenterX, blockCenterZ,
+  lotIndex, lotSize, splitAxis, blockInnerSize,
+  bodyParts, roofParts, shopParts, trimParts, colliders, buildings,
+}) {
+  const lotInset = rngRange(rng, 0.5, 1.6);
+  const width = splitAxis === 'x' ? lotSize - lotInset * 1.6 : blockInnerSize - lotInset * 1.6;
+  const depth = splitAxis === 'x' ? blockInnerSize - lotInset * 1.6 : lotSize - lotInset * 1.6;
+  const positionX = splitAxis === 'x' ? blockStartX + lotIndex * lotSize + lotSize / 2 : blockCenterX;
+  const positionZ = splitAxis === 'x' ? blockCenterZ : blockStartZ + lotIndex * lotSize + lotSize / 2;
+
+  // Building dimensions
+  const numberOfFloors = pick(rng, [2, 3, 3, 4, 5, 6, 8, 10]);
+  const buildingHeight = numberOfFloors * 3.4 + rngRange(rng, 0, 2);
+  const facadeStyle = pick(rng, FACADE_STYLES);
+  const materialKey = facadeStyle.key;
+
+  // Building body geometry
+  const buildingGeometry = buildingGeo(width, buildingHeight, depth);
+  const baseY = 0.22; // On top of sidewalk
+  bodyParts.set(materialKey, bodyParts.get(materialKey) ?? []);
+  bodyParts.get(materialKey).push({
+    geometry: buildingGeometry,
+    matrix: new THREE.Matrix4().makeTranslation(positionX, baseY + buildingHeight / 2, positionZ),
+  });
+
+  // Ground floor shopfront for taller buildings
+  if (buildingHeight > 10) {
+    const shopfrontHeight = 3.0;
+    shopParts.push({
+      geometry: new THREE.BoxGeometry(width + 0.06, shopfrontHeight, depth + 0.06),
+      matrix: new THREE.Matrix4().makeTranslation(positionX, baseY + shopfrontHeight / 2, positionZ),
+    });
+  }
+
+  // Roof and rooftop details
+  roofParts.push({
+    geometry: new THREE.BoxGeometry(width + 0.5, 0.45, depth + 0.5),
+    matrix: new THREE.Matrix4().makeTranslation(positionX, baseY + buildingHeight + 0.1, positionZ),
+  });
+
+  // Rooftop equipment for visual interest
+  if (chance(rng, 0.6)) {
+    const rooftopWidth = width * rngRange(rng, 0.2, 0.35);
+    const rooftopDepth = depth * rngRange(rng, 0.2, 0.35);
+    const rooftopHeight = rngRange(rng, 1.0, 2.2);
+    
+    trimParts.push({
+      geometry: new THREE.BoxGeometry(rooftopWidth, rooftopHeight, rooftopDepth),
+      matrix: new THREE.Matrix4().makeTranslation(
+        positionX + rngRange(rng, -width * 0.2, width * 0.2),
+        baseY + buildingHeight + 0.9,
+        positionZ + rngRange(rng, -depth * 0.2, depth * 0.2),
+      ),
+    });
+  }
+
+  // Add collision data and building metadata.
+  // Every consumer (car, player, pedestrian, camera) reads the collider height as `h`, and the
+  // minimap reads building blocks as w/d — those key names are the cross-module contract.
+  colliders.push({
+    minX: positionX - width / 2,
+    maxX: positionX + width / 2,
+    minZ: positionZ - depth / 2,
+    maxZ: positionZ + depth / 2,
+    h: buildingHeight + baseY,
+  });
+
+  buildings.push({
+    x: positionX, z: positionZ, w: width, d: depth, h: buildingHeight,
+    tone: facadeStyle.key,
+  });
+
+  return { width, depth, height: buildingHeight };
+}
+
+/**
+ * Create building meshes from grouped parts
+ * @param {THREE.Group} group - City group to add to
+ * @param {Map} bodyParts - Grouped building body parts
+ * @param {Array} roofParts - Roof parts array
+ * @param {Array} shopParts - Shopfront parts array
+ * @param {Array} trimParts - Rooftop trim parts array
+ * @param {Array} facadeStyles - Available facade styles
+ * @param {Function} getFacadeMaterial - Function to get facade materials
+ * @param {THREE.Material} roofMaterial - Roof material
+ * @param {THREE.Material} shopMaterial - Shopfront material
+ */
+function createBuildingMeshes(group, bodyParts, roofParts, shopParts, trimParts,
+                            facadeStyles, getFacadeMaterial, roofMaterial, shopMaterial) {
+  
+  // Create building body meshes
+  for (const [key, parts] of bodyParts) {
+    if (!parts.length) continue;
+    const style = facadeStyles.find((s) => s.key === key);
+    const mesh = new THREE.Mesh(mergeGeoms(parts), getFacadeMaterial(style));
+    mesh.name = `buildings-${key}`;
+    group.add(mesh);
+  }
+
+  // Create shopfront mesh
+  if (shopParts.length > 0) {
+    const shopMesh = new THREE.Mesh(mergeGeoms(shopParts), shopMaterial);
+    shopMesh.name = 'shopfronts';
+    group.add(shopMesh);
+  }
+
+  // Create roof mesh
+  if (roofParts.length > 0) {
+    const roofMesh = new THREE.Mesh(mergeGeoms(roofParts), roofMaterial);
+    roofMesh.name = 'roofs';
+    group.add(roofMesh);
+  }
+
+  // Create rooftop equipment mesh
+  if (trimParts.length > 0) {
+    const trimMesh = new THREE.Mesh(
+      mergeGeoms(trimParts), 
+      new THREE.MeshLambertMaterial({ color: 0xb3b7bb })
+    );
+    trimMesh.name = 'rooftop-units';
+    group.add(trimMesh);
+  }
+}
+
+// ===== STREET FURNITURE HELPERS =====
+
+/**
+ * Create street lamps along roads
+ * @param {THREE.Group} group - City group to add to
+ * @param {number} gridSize - City grid size
+ * @param {number} citySpan - Total city span
+ * @param {Function} rng - Random number generator
+ * @param {Array} lamps - Array to add lamp positions to
+ */
+function createStreetLamps(group, gridSize, citySpan, rng, lamps) {
+  const poleParts = [];
+  const headParts = [];
+  
+  for (let i = 0; i <= gridSize; i++) {
+    for (let j = 0; j <= gridSize; j++) {
+      if (!chance(rng, 0.55)) continue; // Skip some positions for realism
+      
+      const centerX = roadCenter(i);
+      const centerZ = roadCenter(j) + CELL_SIZE * 0.5;
+      
+      if (centerZ > citySpan - 2) continue; // Don't place at city edge
+      
+      const side = chance(rng, 0.5) ? 1 : -1;
+      const lampX = centerX + side * (ROAD_WIDTH / 2 + 1.0);
+      
+      lamps.push({ x: lampX, z: centerZ });
+      
+      // Lamp pole
+      poleParts.push({
+        geometry: new THREE.CylinderGeometry(0.13, 0.17, 6.4, 6),
+        matrix: new THREE.Matrix4().makeTranslation(lampX, 3.2, centerZ),
+      });
+      
+      // Lamp head
+      headParts.push({
+        geometry: new THREE.BoxGeometry(1.1, 0.22, 0.5),
+        matrix: new THREE.Matrix4().makeTranslation(lampX - side * 0.5, 6.4, centerZ),
+      });
+    }
+  }
+  
+  // Create lamp meshes
+  if (poleParts.length > 0) {
+    const poleMesh = new THREE.Mesh(
+      mergeGeoms(poleParts), 
+      new THREE.MeshLambertMaterial({ color: 0x555c63 })
+    );
+    poleMesh.name = 'lamp-poles';
+    group.add(poleMesh);
+    
+    const headMesh = new THREE.Mesh(
+      mergeGeoms(headParts),
+      new THREE.MeshBasicMaterial({ color: 0xffe9b8 })
+    );
+    headMesh.name = 'lamp-heads';
+    group.add(headMesh);
+  }
+}
+
+/**
+ * Create trees from positions
+ * @param {THREE.Group} group - City group to add to
+ * @param {Array} positions - Tree positions and scales
+ * @param {Array} colliders - Array to add collision data to
+ */
+function createTrees(group, positions, colliders) {
+  const trunkParts = [];
+  const crownParts = [];
+  
+  for (const tree of positions) {
+    // Tree trunk
+    trunkParts.push({
+      geometry: new THREE.CylinderGeometry(0.22 * tree.scale, 0.3 * tree.scale, 2.4 * tree.scale, 6),
+      matrix: new THREE.Matrix4().makeTranslation(tree.x, 1.2 * tree.scale, tree.z),
+    });
+    
+    // Tree crown (foliage)
+    crownParts.push({
+      geometry: new THREE.IcosahedronGeometry(1.85 * tree.scale, 0),
+      matrix: new THREE.Matrix4().makeTranslation(tree.x, 3.5 * tree.scale, tree.z),
+    });
+    
+    // Tree collision. `h` is the height key every mover reads.
+    colliders.push({
+      minX: tree.x - 0.4,
+      maxX: tree.x + 0.4,
+      minZ: tree.z - 0.4,
+      maxZ: tree.z + 0.4,
+      h: 2.4 * tree.scale,
+    });
+  }
+  
+  // Create tree meshes
+  group.add(new THREE.Mesh(mergeGeoms(trunkParts), new THREE.MeshLambertMaterial({ color: 0x5b4632 })));
+  group.add(new THREE.Mesh(mergeGeoms(crownParts), new THREE.MeshLambertMaterial({ color: 0x4a7a44, flatShading: true })));
+}
+
+/**
+ * Create waterfront area at city edge
+ * @param {THREE.Group} group - City group to add to
+ * @param {number} citySpan - Total city span
+ */
+function createWaterfront(group, citySpan) {
+  // Beach
+  const sandTexture = texSand();
+  sandTexture.repeat.set(30, 6);
+  const beach = new THREE.Mesh(
+    new THREE.BoxGeometry(citySpan + 160, 0.1, 46),
+    new THREE.MeshLambertMaterial({ map: sandTexture, color: 0xd8c49b }),
+  );
+  beach.position.set(citySpan / 2, 0.02, citySpan + 23);
+  group.add(beach);
+
+  // Ocean water
+  const water = new THREE.Mesh(
+    new THREE.PlaneGeometry(citySpan * 2.4, 900, 1, 1).rotateX(-Math.PI / 2),
+    new THREE.MeshLambertMaterial({ 
+      color: 0x2c6f8f, 
+      transparent: true, 
+      opacity: 0.92 
+    }),
+  );
+  water.position.set(citySpan / 2, -0.35, citySpan + 46 + 450);
+  water.name = 'sea';
+  group.add(water);
+}
+
+/**
+ * Generate parking spots along road curbs
+ * @param {THREE.Group} group - City group to add to
+ * @param {number} gridSize - City grid size
+ * @param {number} citySpan - Total city span
+ * @param {Function} rng - Random number generator
+ * @param {Array} spots - Array to add parking spots to
+ */
+function generateParkingSpots(group, gridSize, citySpan, rng, spots) {
+  // Parking spots along north-south roads
+  for (let i = 0; i <= gridSize; i++) {
+    for (let j = 0; j < gridSize; j++) {
+      if (!chance(rng, 0.5)) continue;
+      
+      const roadCenterX = roadCenter(i);
+      const spotZ = roadCenter(j) + CELL_SIZE * 0.5 + rngRange(rng, -4, 4);
+      const side = chance(rng, 0.5) ? 1 : -1;
+      
+      // Kerb parking spot. `rot` faces the car along the kerb; vehicles.js reads spot.rot.
+      spots.push({
+        x: roadCenterX + side * (ROAD_WIDTH / 2 - 1.9),
+        z: spotZ,
+        rot: side > 0 ? Math.PI : 0,
+      });
+    }
+  }
+  
+  // Parking spots along east-west roads
+  for (let j = 0; j <= gridSize; j++) {
+    for (let i = 0; i < gridSize; i++) {
+      if (!chance(rng, 0.5)) continue;
+      
+      const roadCenterZ = roadCenter(j);
+      const spotX = roadCenter(i) + CELL_SIZE * 0.5 + rngRange(rng, -4, 4);
+      const side = chance(rng, 0.5) ? 1 : -1;
+      
+      spots.push({
+        x: spotX,
+        z: roadCenterZ + side * (ROAD_WIDTH / 2 - 1.9),
+        rot: side > 0 ? -Math.PI / 2 : Math.PI / 2,
+      });
+    }
+  }
+}
+
+/**
+ * Generate pedestrian sidewalk routes
+ * @param {number} gridSize - City grid size
+ * @param {number} citySpan - Total city span
+ * @param {Array} routes - Array to add routes to
+ */
+function generatePedestrianRoutes(gridSize, citySpan, routes) {
+  // Routes along north-south sidewalks
+  for (let i = 0; i <= gridSize; i++) {
+    const x = roadCenter(i) + (ROAD_WIDTH / 2 + SIDEWALK_WIDTH * 0.5);
+    routes.push({ axis: 'z', fixed: x, from: ROAD_WIDTH / 2, to: citySpan - ROAD_WIDTH / 2 });
+    routes.push({ axis: 'z', fixed: roadCenter(i) - (ROAD_WIDTH / 2 + SIDEWALK_WIDTH * 0.5), from: ROAD_WIDTH / 2, to: citySpan - ROAD_WIDTH / 2 });
+  }
+  
+  // Routes along east-west sidewalks
+  for (let j = 0; j <= gridSize; j++) {
+    const z = roadCenter(j) + (ROAD_WIDTH / 2 + SIDEWALK_WIDTH * 0.5);
+    routes.push({ axis: 'x', fixed: z, from: ROAD_WIDTH / 2, to: citySpan - ROAD_WIDTH / 2 });
+    routes.push({ axis: 'x', fixed: roadCenter(j) - (ROAD_WIDTH / 2 + SIDEWALK_WIDTH * 0.5), from: ROAD_WIDTH / 2, to: citySpan - ROAD_WIDTH / 2 });
+  }
+}
+
+/**
+ * Create road graph for traffic navigation
+ * @param {number} gridSize - City grid size
+ * @param {number} citySpan - Total city span
+ * @returns {Object} - Road graph data
+ */
+function createRoadGraph(gridSize, citySpan) {
+  const nodes = [];
+  const nodeIndex = (i, j) => j * (gridSize + 1) + i;
+  
+  // Create nodes at all road intersections
+  for (let j = 0; j <= gridSize; j++) {
+    for (let i = 0; i <= gridSize; i++) {
+      nodes.push({ 
+        i, j, 
+        x: roadCenter(i), 
+        z: roadCenter(j) 
+      });
+    }
+  }
+  
+  // Create neighbour connections (grid-adjacent nodes only).
+  const neighbours = nodes.map((node) => {
+    const connections = [];
+    if (node.i > 0) connections.push(nodeIndex(node.i - 1, node.j));
+    if (node.i < gridSize) connections.push(nodeIndex(node.i + 1, node.j));
+    if (node.j > 0) connections.push(nodeIndex(node.i, node.j - 1));
+    if (node.j < gridSize) connections.push(nodeIndex(node.i, node.j + 1));
+    return connections;
+  });
+
+  return { nodes, neighbours, index: nodeIndex };
+}
+
+// ===== EXPORT MATERIAL CONSTANTS =====
+export { FACADE_STYLES as FACADE_TONES };
