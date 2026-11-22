@@ -1,0 +1,7 @@
+# Build output from `main.ts` (MAKEFUN_OUTPUT_DIR) — never committed, it is regenerated on demand.
+out/
+out2/
+node_modules/
+
+# Transient test artefacts written by the Playwright harnesses.
+*.log
