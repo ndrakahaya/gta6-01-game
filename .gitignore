@@ -3,5 +3,10 @@ out/
 out2/
 node_modules/
 
-# Transient test artefacts written by the Playwright harnesses.
+# Transient test artefacts written by the Playwright harnesses and the QA scripts.
 *.log
+
+# Screenshot captures: shots4.cjs writes PNGs here, finalize_shots.py re-encodes them to the
+# committed JPEG set and removes the PNGs. If a capture is interrupted the PNGs would otherwise
+# show up as untracked files, and an extra image would also break the 4-screenshot cap.
+screenshots/*.png

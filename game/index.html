@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Puerto Vela — Chapter One</title>
 <link rel="stylesheet" href="src/ui.css" />
+<!--
+  three.js is vendored next to this file, so the game plays straight off disk with no network
+  request and no build step. The import map is what lets the modules write `import * as THREE
+  from 'three'` while the actual file lives under vendor/.
+-->
 <script type="importmap">
 {
   "imports": {
@@ -14,10 +19,15 @@
 </script>
 </head>
 <body>
+<!-- The WebGL canvas sits behind every DOM layer. -->
 <canvas id="view"></canvas>
 
+<!-- Vignette: purely decorative, sits above the canvas and below the HUD. -->
 <div id="vignette" aria-hidden="true"></div>
+
+<!-- ============ HUD (hidden until a game starts) ============ -->
 <div id="hud" class="hidden">
+  <!-- Top left: health and armor -->
   <div id="hud-top-left">
     <div id="health-wrap">
       <div id="health-bar"><div id="health-fill"></div></div>
@@ -27,17 +37,20 @@
     <div id="stamina-label">ARMOR</div>
   </div>
 
+  <!-- Top right: cash and wanted stars -->
   <div id="hud-top-right">
     <div id="cash">$0</div>
     <div id="wanted" aria-label="wanted level"></div>
   </div>
 
+  <!-- Bottom left: circular minimap with the in-world clock above it -->
   <div id="minimap-wrap">
     <canvas id="minimap" width="200" height="200"></canvas>
     <div id="minimap-ring"></div>
     <div id="clock">16:40</div>
   </div>
 
+  <!-- Bottom right: current weapon and ammo -->
   <div id="hud-bottom-left">
     <div id="weapon-slot">
       <span id="weapon-name">FISTS</span>
@@ -45,18 +58,21 @@
     </div>
   </div>
 
+  <!-- Top centre: the live mission objective -->
   <div id="objective" class="hidden">
     <div id="objective-title">OBJECTIVE</div>
     <div id="objective-text"></div>
     <div id="objective-dist"></div>
   </div>
 
+  <!-- Transient layers -->
   <div id="subtitle" class="hidden"></div>
   <div id="prompt" class="hidden"></div>
   <div id="toast" class="hidden"></div>
   <div id="damage-flash"></div>
 </div>
 
+<!-- ============ Title screen ============ -->
 <div id="title-screen" class="overlay">
   <div class="title-inner">
     <div class="title-kicker">CHAPTER ONE</div>
@@ -74,6 +90,7 @@
   <div class="title-save" id="save-info"></div>
 </div>
 
+<!-- ============ Pause menu ============ -->
 <div id="pause-screen" class="overlay hidden">
   <div class="panel">
     <h2>PAUSED</h2>
@@ -85,6 +102,8 @@
   </div>
 </div>
 
+<!-- ============ Controls reference ============ -->
+<!-- Every row here is a control the game actually binds; nothing is advertised that does not work. -->
 <div id="controls-screen" class="overlay hidden">
   <div class="panel wide">
     <h2>CONTROLS</h2>
@@ -92,20 +111,21 @@
       <div><b>W A S D</b><span>Move / drive</span></div>
       <div><b>Mouse</b><span>Look around</span></div>
       <div><b>Shift</b><span>Sprint / boost</span></div>
+      <div><b>Ctrl</b><span>Walk slowly</span></div>
       <div><b>Space</b><span>Jump / handbrake</span></div>
       <div><b>E</b><span>Enter or exit vehicle</span></div>
       <div><b>Left click</b><span>Punch / shoot</span></div>
       <div><b>Right click</b><span>Aim weapon</span></div>
       <div><b>1 / 2 / 3</b><span>Fists / pistol / SMG</span></div>
-      <div><b>R</b><span>Reload</span></div>
-      <div><b>F</b><span>Horn</span></div>
-      <div><b>M</b><span>Toggle map size</span></div>
+      <div><b>F</b><span>Car horn</span></div>
+      <div><b>Shift + R</b><span>Quick save</span></div>
       <div><b>Esc</b><span>Pause</span></div>
     </div>
     <button id="btn-controls-back" class="btn primary">BACK</button>
   </div>
 </div>
 
+<!-- ============ WASTED screen ============ -->
 <div id="gameover-screen" class="overlay hidden">
   <div class="panel">
     <h2 class="wasted">WASTED</h2>
@@ -114,10 +134,11 @@
   </div>
 </div>
 
+<!-- ============ Loading veil ============ -->
 <div id="loading" class="overlay">
   <div class="load-inner">
     <div class="load-bar"><div id="load-fill"></div></div>
-    <div id="load-text">Building Puerto Vela…</div>
+    <div id="load-text">Building Puerto Vela...</div>
   </div>
 </div>
 
