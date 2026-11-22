@@ -1,36 +1,56 @@
-// Vehicle registry and player interaction: spawns parked cars and civilian traffic, decides
-// which car the player may steal, moves the player in/out of a seat, and drives the AI tick.
+// Vehicle registry and player interaction.
+// Spawns parked cars and civilian traffic, decides which car the player may steal, moves the
+// player in and out of a seat, and ticks every vehicle's physics each frame.
 //
-// Rendering shape: each car draws its body in one call, and ALL wheels in the world go through
-// a single InstancedMesh, so 40 cars cost ~40 draws instead of ~200.
+// Rendering shape: each car body draws in one call, and ALL wheels in the world go through a
+// single InstancedMesh, so 40 cars cost roughly 40 draws instead of ~200.
 
 import * as THREE from 'three';
 import { CONFIG } from './config.js';
 import { Car, CAR_KINDS, wheelGeometry } from './car.js';
-import { pick, rngRange, rngInt, chance } from './rng.js';
+import { pick, chance } from './rng.js';
 
+// Weighted list of kinds that may appear parked at a kerb (sedans dominate, as in a real city).
 const PARKED_KINDS = ['sedan', 'sedan', 'coupe', 'muscle', 'van', 'taxi', 'sedan', 'coupe'];
+
+// Upper bound on simultaneously rendered wheels: 4 per car, far above the ~40 cars we spawn.
 const MAX_WHEELS = 400;
 
+// Kerbside spawn tuning.
+const MAX_PARKED_CARS = 30;      // cap so a dense grid can't flood the streets
+const PARKED_CHANCE = 0.55;      // fraction of candidate spots that actually get a car
+const PARKED_MIN_GAP = 6;        // metres, keeps parked cars from overlapping
+
+// A car is hidden (and skipped by the wheel sync) beyond this distance from the player.
+const CULL_DISTANCE = 420;
+
+/**
+ * Owns every vehicle in the world and the shared wheel batch.
+ * Groups are exposed separately (parked/traffic/police) for systems that care about a subset.
+ */
 export class VehicleManager {
   constructor(scene, city, rng) {
     this.scene = scene;
     this.city = city;
     this.rng = rng;
-    this.cars = [];
-    this.parked = [];
-    this.traffic = [];
-    this.police = [];
-    this.nearCar = null;
-    this.onCrash = null;
 
-    const wheelMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-    this.tyreMesh = new THREE.InstancedMesh(wheelGeometry, wheelMat, MAX_WHEELS);
+    this.cars = [];     // every vehicle, in spawn order
+    this.parked = [];   // kerbside cars
+    this.traffic = [];  // civilian traffic
+    this.police = [];   // cruisers
+
+    this.nearCar = null;  // currently highlighted enterable car (set by gameplay code)
+    this.onCrash = null;  // (car, damage) callback, wired to effects + audio
+
+    // One instanced mesh draws every wheel of every car in a single call.
+    const wheelMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+    this.tyreMesh = new THREE.InstancedMesh(wheelGeometry, wheelMaterial, MAX_WHEELS);
     this.tyreMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.tyreMesh.frustumCulled = false;
+    this.tyreMesh.frustumCulled = false; // wheels move every frame; culling the batch is wrong
     this.tyreMesh.count = 0;
     scene.add(this.tyreMesh);
 
+    // Reusable transforms, allocated once to avoid per-frame garbage.
     this._m = new THREE.Matrix4();
     this._q = new THREE.Quaternion();
     this._e = new THREE.Euler();
@@ -40,90 +60,156 @@ export class VehicleManager {
     this.spawnParked();
   }
 
+  /**
+   * Scatter parked cars along the kerbside spots the city generated.
+   * Spots are filtered by a probability roll and a minimum-gap check so kerbs look organic
+   * rather than uniformly filled.
+   */
   spawnParked() {
     const rng = this.rng;
-    const spots = this.city.parkedSpots;
     const used = [];
-    for (const spot of spots) {
-      if (used.length >= 30) break;
-      if (!chance(rng, 0.55)) continue;
+
+    for (const spot of this.city.parkedSpots) {
+      if (used.length >= MAX_PARKED_CARS) break;
+      if (!chance(rng, PARKED_CHANCE)) continue;
+
+      // Reject spots that would overlap a car we already placed.
       let clash = false;
-      for (const u of used) {
-        if (Math.hypot(u.x - spot.x, u.z - spot.z) < 6) { clash = true; break; }
+      for (const taken of used) {
+        if (Math.hypot(taken.x - spot.x, taken.z - spot.z) < PARKED_MIN_GAP) {
+          clash = true;
+          break;
+        }
       }
       if (clash) continue;
+
       const kind = pick(rng, PARKED_KINDS);
       const spec = CAR_KINDS[kind];
-      const car = new Car(this.scene, { kind, color: pick(rng, spec.colors) });
-      car.placeAt(spot.x, spot.z, spot.rot);
-      car.worldSpan = this.city.span + 40;
-      car.onCrash = (d) => this.onCrash?.(car, d);
+      const car = this.makeCar({ kind, color: pick(rng, spec.colors) }, spot);
       car.parked = true;
-      this.cars.push(car);
       this.parked.push(car);
       used.push(spot);
     }
   }
 
+  /**
+   * Spawn a police cruiser and register it in the police group.
+   * @param {number} x - Spawn X
+   * @param {number} z - Spawn Z
+   * @param {number} heading - Facing angle in radians
+   * @returns {Car} - The new cruiser
+   */
   spawnPolice(x, z, heading) {
-    const car = new Car(this.scene, { kind: 'police', color: 0x16202e });
-    car.placeAt(x, z, heading);
-    car.worldSpan = this.city.span + 40;
+    const car = this.makeCar({ kind: 'police', color: 0x16202e }, { x, z, rot: heading });
     car.driver = 'police';
-    car.onCrash = (d) => this.onCrash?.(car, d);
-    this.cars.push(car);
     this.police.push(car);
     return car;
   }
 
+  /**
+   * Create a car, position it, wire its crash callback and add it to the registry.
+   * Shared by every spawn path so world bounds and crash wiring can never be forgotten.
+   * @param {Object} spec - { kind, color }
+   * @param {Object} placement - { x, z, rot }
+   * @returns {Car} - The created car
+   */
+  makeCar(spec, placement) {
+    const car = new Car(this.scene, spec);
+    car.placeAt(placement.x, placement.z, placement.rot);
+    // Cars may leave the city grid a little before the boundary wall stops them.
+    car.worldSpan = this.city.span + 40;
+    car.onCrash = (damage) => this.onCrash?.(car, damage);
+    this.cars.push(car);
+    return car;
+  }
+
+  /**
+   * Remove a car from the world and every group it belongs to.
+   * @param {Car} car - Car to remove
+   */
   despawn(car) {
-    const i = this.cars.indexOf(car);
-    if (i >= 0) this.cars.splice(i, 1);
-    const j = this.police.indexOf(car);
-    if (j >= 0) this.police.splice(j, 1);
-    const k = this.traffic.indexOf(car);
-    if (k >= 0) this.traffic.splice(k, 1);
+    const remove = (list) => {
+      const i = list.indexOf(car);
+      if (i >= 0) list.splice(i, 1);
+    };
+    remove(this.cars);
+    remove(this.police);
+    remove(this.traffic);
     car.dispose(this.scene);
   }
 
+  /**
+   * Find the nearest enterable (not exploded) car within range of a point.
+   * @param {THREE.Vector3} pos - Origin position
+   * @param {number} range - Maximum search distance
+   * @returns {Car|null} - Nearest candidate, or null
+   */
   findNearestEnterable(pos, range) {
     let best = null;
-    let bestD = range;
+    let bestDistance = range;
+
     for (const car of this.cars) {
       if (car.exploded) continue;
-      const d = Math.hypot(car.pos.x - pos.x, car.pos.z - pos.z);
-      if (d < bestD) { best = car; bestD = d; }
+      const distance = Math.hypot(car.pos.x - pos.x, car.pos.z - pos.z);
+      if (distance < bestDistance) {
+        best = car;
+        bestDistance = distance;
+      }
     }
     return best;
   }
 
+  /**
+   * Seat the player in a car.
+   * Stealing a parked or occupied car flags it as stolen so the owner's AI won't re-enter it.
+   * @param {Car} car - Target car
+   * @param {Object} player - Player instance
+   * @returns {boolean} - True when the player was seated
+   */
   enterCar(car, player) {
     if (!car || car.exploded) return false;
+
     car.occupiedByPlayer = true;
-    if (car.parked) { car.stolen = true; car.parked = false; }
+    if (car.parked) {
+      car.stolen = true;
+      car.parked = false;
+    }
     if (car.driver === 'ai' || car.driver === 'police') car.stolen = true;
     car.driver = 'player';
+
     player.inCar = car;
     player.mesh.visible = false;
     player.shadow.visible = false;
     player.vel.set(0, 0, 0);
+
+    // Park the car on entry: zero throttle with the brake held so it doesn't roll away.
     car.throttle = 0;
     car.brake = 1;
     car.steer = 0;
+
     this.nearCar = null;
     return true;
   }
 
+  /**
+   * Move the player out of the car, placing them beside the driver's door.
+   * @param {Object} player - Player instance
+   * @returns {boolean} - True when the player exited
+   */
   exitCar(player) {
     const car = player.inCar;
     if (!car) return false;
+
     const door = car.doorPoint(new THREE.Vector3());
     player.pos.set(door.x, 0, door.z);
     player.vel.set(0, 0, 0);
     player.mesh.visible = true;
     player.shadow.visible = true;
     player.mesh.position.set(door.x, 0, door.z);
+    // Face away from the car, toward the kerb.
     player.facing = car.heading + Math.PI / 2;
+
+    // Hand the car back to the world, stopped and empty.
     car.occupiedByPlayer = false;
     car.throttle = 0;
     car.brake = 1;
@@ -132,42 +218,66 @@ export class VehicleManager {
     return true;
   }
 
+  /**
+   * Tick every car's physics, then refresh the shared wheel batch.
+   * @param {number} dt - Delta time in seconds
+   */
   update(dt) {
-    for (const car of this.cars) car.update(dt, { colliders: this.city.colliders });
+    for (const car of this.cars) {
+      car.update(dt, { colliders: this.city.colliders });
+    }
     this.syncWheels();
   }
 
-  /** Push every visible car's four wheels into the shared instanced mesh. */
+  /**
+   * Push every visible car's four wheels into the shared instanced mesh.
+   * Wheel local offsets are rotated into world space by the car's heading, and the front
+   * pair also takes a fraction of the steer angle so they visibly turn.
+   */
   syncWheels() {
-    let n = 0;
-    const m = this._m;
-    const q = this._q;
-    const e = this._e;
-    const p = this._p;
+    let count = 0;
+    const { _m: m, _q: q, _e: e, _p: p, _s: s } = this;
+
     for (const car of this.cars) {
       if (!car.mesh.visible) continue;
-      const ch = Math.cos(car.heading);
-      const sh = Math.sin(car.heading);
+
+      const cosH = Math.cos(car.heading);
+      const sinH = Math.sin(car.heading);
+
       for (let i = 0; i < car.wheels.length; i++) {
-        if (n >= MAX_WHEELS) break;
-        const w = car.wheels[i];
-        const wx = car.pos.x + w.x * ch + w.z * sh;
-        const wz = car.pos.z - w.x * sh + w.z * ch;
-        e.set(car.wheelSpin, car.heading + (w.front ? car.steer * 0.45 : 0), 0, 'YXZ');
+        if (count >= MAX_WHEELS) break;
+        const wheel = car.wheels[i];
+
+        // Rotate the local offset by the heading to get the world position.
+        const wheelX = car.pos.x + wheel.x * cosH + wheel.z * sinH;
+        const wheelZ = car.pos.z - wheel.x * sinH + wheel.z * cosH;
+
+        e.set(
+          car.wheelSpin,
+          car.heading + (wheel.front ? car.steer * 0.45 : 0),
+          0,
+          'YXZ',
+        );
         q.setFromEuler(e);
-        p.set(wx, w.y, wz);
-        m.compose(p, q, this._s);
-        this.tyreMesh.setMatrixAt(n, m);
-        n++;
+        p.set(wheelX, wheel.y, wheelZ);
+        m.compose(p, q, s);
+        this.tyreMesh.setMatrixAt(count, m);
+        count++;
       }
     }
-    this.tyreMesh.count = n;
+
+    this.tyreMesh.count = count;
     this.tyreMesh.instanceMatrix.needsUpdate = true;
   }
 
+  /**
+   * Hide cars that are far from the player. Hidden cars are also skipped by syncWheels,
+   * so this trims both draw calls and per-frame work.
+   * @param {THREE.Vector3} playerPos - Player position
+   */
   cullFar(playerPos) {
     for (const car of this.cars) {
-      const far = Math.hypot(car.pos.x - playerPos.x, car.pos.z - playerPos.z) > 420;
+      const far = Math.hypot(car.pos.x - playerPos.x, car.pos.z - playerPos.z) > CULL_DISTANCE;
       car.mesh.visible = !far;
     }
   }

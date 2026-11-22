@@ -1,8 +1,18 @@
+/* Puerto Vela — HUD and menu styling.
+ *
+ * Layout notes:
+ *   #view (WebGL canvas) is fixed behind everything; #vignette, then #hud, then the overlays
+ *   stack above it by z-index. Every HUD element is pointer-events: none so clicks reach the
+ *   canvas for pointer lock; only the overlay buttons opt back in.
+ *
+ * Colours come from the custom properties on :root so the palette is changed in one place.
+ */
+
 :root {
-  --accent: #ffcf5c;
-  --accent2: #ff7a45;
-  --danger: #e8503a;
-  --ink: #0b0e13;
+  --accent: #ffcf5c;        /* gold: wanted stars, objective rail, primary buttons */
+  --accent2: #ff7a45;       /* warm secondary, kept for future alert styling */
+  --danger: #e8503a;        /* WASTED heading, low-health bar */
+  --ink: #0b0e13;           /* base dark, used behind the canvas */
   --panel: rgba(10, 14, 20, 0.82);
   --stroke: rgba(255, 207, 92, 0.35);
   --font: "Trebuchet MS", "Segoe UI", Tahoma, sans-serif;
@@ -22,6 +32,7 @@ html, body {
   cursor: default;
 }
 
+/* The WebGL canvas fills the window and sits under every DOM layer. */
 #view {
   position: fixed;
   inset: 0;
@@ -30,6 +41,7 @@ html, body {
   display: block;
 }
 
+/* Decorative darkened edge: above the canvas, below the HUD. */
 #vignette {
   position: fixed;
   inset: 0;
@@ -38,17 +50,23 @@ html, body {
   z-index: 2;
 }
 
+/* !important because it must beat the display rules on every element it is applied to. */
 .hidden { display: none !important; }
 
-/* ---------------- HUD ---------------- */
+/* ==========================================================================
+   HUD
+   ========================================================================== */
+
 #hud {
   position: fixed;
   inset: 0;
-  pointer-events: none;
+  pointer-events: none;   /* clicks fall through to the canvas for pointer lock */
   z-index: 5;
   font-weight: 700;
   letter-spacing: 0.04em;
 }
+
+/* ---------------- top left: health + armor ---------------- */
 
 #hud-top-left {
   position: absolute;
@@ -68,14 +86,13 @@ html, body {
   box-shadow: 0 2px 8px rgba(0,0,0,0.5);
 }
 
+/* Width and colour are both driven from hud.js, which recolours the fill as health drops. */
 #health-fill {
   height: 100%;
   width: 100%;
   background: linear-gradient(90deg, #6fdc6f, #b6f06a);
   transition: width 0.18s linear, background 0.3s;
 }
-
-#health-fill.low { background: linear-gradient(90deg, #e8503a, #ff9a3a); }
 
 #health-label {
   font-size: 9px;
@@ -107,6 +124,8 @@ html, body {
   margin-top: 3px;
 }
 
+/* ---------------- top right: cash + wanted stars ---------------- */
+
 #hud-top-right {
   position: absolute;
   top: 14px;
@@ -130,6 +149,7 @@ html, body {
   height: 26px;
 }
 
+/* Five spans are built by hud.js; .on lights the earned ones. */
 .star {
   width: 24px;
   height: 24px;
@@ -141,16 +161,15 @@ html, body {
   text-align: center;
   color: #d8dde4;
 }
-.star svg { width: 100%; height: 100%; display: block; }
-.star.on { opacity: 1; color: var(--accent); filter: drop-shadow(0 0 6px rgba(255, 200, 60, 0.9)); }
-.star.pulse { animation: starPulse 0.7s infinite alternate; }
 
-@keyframes starPulse {
-  from { transform: scale(1); }
-  to { transform: scale(1.16); }
+.star.on {
+  opacity: 1;
+  color: var(--accent);
+  filter: drop-shadow(0 0 6px rgba(255, 200, 60, 0.9));
 }
 
-/* ---------------- minimap ---------------- */
+/* ---------------- bottom left: minimap + clock ---------------- */
+
 #minimap-wrap {
   position: absolute;
   left: 20px;
@@ -189,7 +208,8 @@ html, body {
   text-shadow: 0 1px 4px #000;
 }
 
-/* ---------------- weapon ---------------- */
+/* ---------------- bottom right: weapon + ammo ---------------- */
+
 #hud-bottom-left {
   position: absolute;
   right: 24px;
@@ -217,7 +237,8 @@ html, body {
   color: #fff;
 }
 
-/* ---------------- objective ---------------- */
+/* ---------------- top centre: mission objective ---------------- */
+
 #objective {
   position: absolute;
   top: 16px;
@@ -255,7 +276,8 @@ html, body {
   font-weight: 600;
 }
 
-/* ---------------- subtitles ---------------- */
+/* ---------------- transient layers ---------------- */
+
 #subtitle {
   position: absolute;
   bottom: 78px;
@@ -273,8 +295,6 @@ html, body {
   text-shadow: 0 1px 3px #000;
 }
 
-#subtitle .who { color: var(--accent); font-weight: 800; }
-
 #prompt {
   position: absolute;
   bottom: 132px;
@@ -286,16 +306,6 @@ html, body {
   border-radius: 3px;
   font-size: 14px;
   letter-spacing: 0.06em;
-}
-
-#prompt b {
-  display: inline-block;
-  padding: 1px 7px;
-  margin-right: 7px;
-  border-radius: 3px;
-  background: #eef2f6;
-  color: #10141a;
-  font-size: 13px;
 }
 
 #toast {
@@ -310,6 +320,7 @@ html, body {
   letter-spacing: 0.04em;
 }
 
+/* Opacity is pulsed from hud.js on each hit, then falls back to 0 here. */
 #damage-flash {
   position: absolute;
   inset: 0;
@@ -318,7 +329,10 @@ html, body {
   transition: opacity 0.16s;
 }
 
-/* ---------------- overlays ---------------- */
+/* ==========================================================================
+   Overlays (title, pause, controls, WASTED, loading)
+   ========================================================================== */
+
 .overlay {
   position: fixed;
   inset: 0;
@@ -330,6 +344,9 @@ html, body {
   backdrop-filter: blur(2px);
 }
 
+/* ---------------- title screen ---------------- */
+
+/* A vertical scrim rather than a flat fill, so the orbiting city stays visible behind the menu. */
 #title-screen {
   background:
     linear-gradient(180deg, rgba(6,9,14,0.55) 0%, rgba(6,9,14,0.82) 55%, rgba(6,9,14,0.96) 100%);
@@ -397,6 +414,7 @@ html, body {
   flex-wrap: wrap;
 }
 
+/* Mid-dot separators between hints, suppressed before the first item. */
 .title-foot span::before {
   content: "·";
   margin-right: 18px;
@@ -414,6 +432,8 @@ html, body {
   letter-spacing: 0.16em;
   opacity: 0.42;
 }
+
+/* ---------------- buttons ---------------- */
 
 .btn {
   appearance: none;
@@ -440,6 +460,8 @@ html, body {
 .btn.primary:hover { background: #ffdd85; }
 .btn.ghost { background: transparent; border-color: rgba(255,255,255,0.16); opacity: 0.75; }
 .btn:disabled { opacity: 0.32; cursor: not-allowed; }
+
+/* ---------------- menu panels ---------------- */
 
 .panel {
   min-width: 340px;
@@ -477,6 +499,8 @@ html, body {
   line-height: 1.7;
 }
 
+/* ---------------- controls grid ---------------- */
+
 .ctrl-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -502,7 +526,9 @@ html, body {
 }
 .ctrl-grid span { opacity: 0.72; font-size: 12px; }
 
-/* ---------------- loading ---------------- */
+/* ---------------- loading veil ---------------- */
+
+/* Highest z-index in the file: it must cover the title screen while the city builds. */
 #loading {
   background: #0a0d12;
   z-index: 40;
